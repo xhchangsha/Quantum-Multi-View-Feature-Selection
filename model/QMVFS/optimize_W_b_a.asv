@@ -1,0 +1,110 @@
+function [alpha, beta, W, obj_values] = optimize_W_b_a(X, K, lambda, p, gamma, max_iter, eta, tol)
+% Inputs:
+%   X       - cell array，X{v} represents the data of the v-th view, with a size of n x d_v.
+%   K       - cell array，K{v}{i} represents the i-th kernel matrix of the v-th view, with a size of n x n.
+%   lambda  - regularization parameter
+%   p       - view weight exponent 
+%   gamma   - 熵正则化参数
+%   max_iter - 最大迭代次数
+%   tol     - 收敛阈值（目标函数差值）
+%
+% Outputs:
+%   alpha   - V x 1 视图权重向量
+%   beta    - k x V 核组合权重
+%   W       - cell array，W{v} 是第 v 个视图的投影矩阵
+%   obj_values - 每次迭代目标函数值序列
+
+[V, k] = size(K);      % 视图数,每个视图核数
+n = size(X{1}, 1);     % 样本数
+
+% 初始化
+alpha = ones(V, 1) / V;
+beta = repmat(ones(k, 1) / k, 1, V);  % 每列对应一个 beta_v
+W = cell(V, 1);
+obj_values = zeros(max_iter, 1);
+obj_prev = Inf;
+
+for v = 1:V
+    d = size(X{v}, 2);
+    W{v} = randn(d, n);
+end
+
+for iter = 1:max_iter
+    %% Step 1: 更新 W_v
+    for v = 1:V
+        Kv_comb = zeros(n);
+        for i = 1:k
+            Kv_comb = Kv_comb + beta(i, v) * K{v, i};
+        end
+        Xv = X{v};
+        Wv = W{v};
+        row_norms = sqrt(sum(Wv.^2, 2)) + 1e-6;
+        D = diag(0.5 ./ row_norms);
+        A = Xv' * Xv + (lambda / alpha(v)^p) * D;
+        B = Xv' * Kv_comb;
+        W{v} = A \ B;
+    end
+
+    %% Step 2: 更新 beta_v
+    for v = 1:V
+        T = X{v} * W{v};
+        grad = zeros(k, 1);
+        for i = 1:k
+            Ki = K{v, i};
+            trace_KTi = trace(T' * Ki);
+            for j = 1:k
+                Kj = K{v, j};
+                grad(i) = grad(i) + 2 * beta(j, v) * trace(Kj' * Ki);
+            end
+            grad(i) = grad(i) - 2 * trace_KTi - gamma * (1 + log(beta(i, v) + 1e-12));
+        end
+        % gradient step
+        % eta = 1e-6;
+        beta_tilde = beta(:,v) - eta * grad;
+        beta(:, v) = project_simplex(beta_tilde);
+    end
+
+    %% Step 3: 更新 alpha
+    E = zeros(V, 1);
+    for v = 1:V
+        Kv_comb = zeros(n);
+        for i = 1:k
+            Kv_comb = Kv_comb + beta(i, v) * K{v, i};
+        end
+        E(v) = norm(Kv_comb - X{v} * W{v}, 'fro')^2;
+    end
+    alpha = (E .^ (1 / (1 - p)))';
+    alpha = alpha / sum(alpha);  % 归一化
+
+    %% Step 4: 目标函数值 + 收敛判断
+    obj_now = 0;
+    for v = 1:V
+        Kv_comb = zeros(n);
+        for i = 1:k
+            Kv_comb = Kv_comb + beta(i, v) * K{v, i};
+        end
+        term1 = norm(Kv_comb - X{v} * W{v}, 'fro')^2;
+        term2 = sum(sqrt(sum(W{v}.^2, 2)));
+        ent = sum(beta(:, v) .* log(beta(:, v) + 1e-12));
+        obj_now = obj_now + alpha(v)^p * term1 + lambda * term2 - gamma * ent;
+    end
+    obj_values(iter) = obj_now;
+
+    if abs(obj_prev - obj_now) < tol
+        fprintf('收敛于第 %d 次迭代，目标函数变化为 %.6f\n', iter, abs(obj_now - obj_prev));
+        obj_values = obj_values(1:iter);
+        break;
+    end
+    obj_prev = obj_now;
+end
+end
+
+function proj = project_simplex(y)
+% 将向量 y 投影到概率单纯形
+k = length(y);
+u = sort(y, 'descend');
+cssv = cumsum(u);
+rho = find(u + (1 - cssv) ./ (1:k)' > 0, 1, 'last');
+theta = (cssv(rho) - 1) / rho;
+proj = max(y - theta, 0);
+end
